@@ -36,7 +36,7 @@ where `mu_Sun = 1.32712440018e11 km^3/s^2`
 
 **Solar radiation pressure (cannonball model):**
 ```
-a_SRP = -C_R * (Phi_1AU / c) * (AU / |r_sc/Sun|)^2 * (A/m) * r_hat_Sun/sc
+a_SRP = C_R * (Phi_1AU / c) * (AU / |r_sc/Sun|)^2 * (A/m) * r_hat_Sun/sc
 ```
 where `Phi_1AU = 1357 W/m^2`, `c = 299792.458 km/s`, `A/m = 0.01 m^2/kg`
 
@@ -44,7 +44,7 @@ The state transition matrix (STM) `Phi(t, t0)` is propagated alongside the equat
 ```
 Phi_dot(t, t0) = A(t) * Phi(t, t0),    Phi(t0, t0) = I
 ```
-where `A(t)` is the 7x7 Jacobian containing partial derivatives of all accelerations with respect to position, velocity, and `C_R`. Earth ephemeris is computed using the Meeus algorithm.
+where `A(t)` is the 7x7 Jacobian containing partial derivatives of all accelerations with respect to position, velocity, and `C_R`. Earth ephemeris is computed using the Meeus algorithm (`utils/Ephem.m`). Integration uses `ode45` with RelTol = 1e-12, AbsTol = 1e-14.
 
 ---
 
@@ -72,17 +72,17 @@ Measurement noise: **5 m (range)**, **0.5 mm/s (range-rate)**
 
 Iteratively minimizes the weighted sum of squared measurement residuals over all observations. State correction per iteration:
 ```
-x_hat = (H^T W H)^{-1} H^T W (y - h(x))
+x_hat = (P_bar^{-1} + H^T W H)^{-1} (P_bar^{-1} x_bar + H^T W (y - h(x)))
 ```
-Converges in 5 iterations. Best suited for Part 2 (stationary dynamics).
+Converges when `|x_hat| < 1e-7`. Best suited for Part 2 (stationary dynamics).
 
 ### Classical Kalman Filter (CKF)
 
 Sequential filter linearized around a fixed reference trajectory. Time update propagates state and covariance forward via the STM; measurement update applies the Kalman gain:
 ```
 K_k = P_bar_k H_k^T (H_k P_bar_k H_k^T + R_k)^{-1}
-x_hat_k = x_bar_k + K_k (y_k - h(x_bar_k))
-P_k = (I - K_k H_k) P_bar_k
+x_hat_k = x_bar_k + K_k (y_k - h(x_bar_k) - H_k x_bar_k)
+P_k = (I - K_k H_k) P_bar_k (I - K_k H_k)^T + K_k R_k K_k^T   [Joseph form]
 ```
 
 ### Extended Kalman Filter (EKF)
@@ -92,7 +92,7 @@ Extends the CKF by re-linearizing around the current state estimate at each step
 - Nominal operations: `Q_nominal = 0`
 - Maneuver window (post-gap): elevated `Q_high` concentrated around the anomaly time
 
-The EKF also supports explicit maneuver modeling by augmenting the state with impulsive `[dVx, dVy, dVz]` parameters applied at the estimated maneuver epoch.
+The EKF also supports explicit maneuver modeling by applying an impulsive delta-V at the estimated maneuver epoch and re-linearizing from the post-maneuver state.
 
 ---
 
@@ -110,6 +110,26 @@ The EKF also supports explicit maneuver modeling by augmenting the state with im
 
 Final post-fit RMS of **4.96 m (range)** and **0.50 mm/s (range-rate)** match the expected measurement noise, confirming a well-converged solution.
 
+### Pre-fit and Post-fit Residuals
+
+![Pre-fit residuals](figures/batch_prefit_residuals.png)
+
+![Post-fit residuals](figures/batch_postfit_residuals.png)
+
+Post-fit range residuals are bounded within ±0.02 km and range-rate within ±2×10⁻⁶ km/s, consistent with the specified measurement noise. The white-noise character of the post-fit residuals confirms the filter is not systematically mismodeling the dynamics.
+
+### Trajectory Comparison
+
+![Trajectory](figures/trajectory_xy.png)
+
+The batch filter best-fit trajectory lies directly on top of the truth, confirming the dynamics model is correctly implemented.
+
+### Position and Velocity 3-sigma Covariance Envelopes
+
+![Position 3-sigma](figures/batch_position_3sigma.png)
+
+![Velocity 3-sigma](figures/batch_velocity_3sigma.png)
+
 ### B-Plane Targeting Accuracy
 
 B-plane parameters computed at `3 x R_SOI = 2,775,000 km`:
@@ -122,9 +142,11 @@ B-plane parameters computed at `3 x R_SOI = 2,775,000 km`:
 | 200 days | 14971.34  | 9796.86   |
 | **Truth**| **14970.82** | **9796.74** |
 
-After 150 days, B·R is within **0.08 km (0.0005%)** and B·T within **0.28 km (0.003%)** of truth. The B-plane covariance ellipses shrink by more than an order of magnitude between 50 and 200 days of data, with the largest reduction between 50 and 100 days.
+After 150 days, B·R is within **0.08 km (0.0005%)** and B·T within **0.28 km (0.003%)** of truth.
 
-> **Figures:** `figures/bplane_covariance_ellipses_part2.png` — 3-sigma uncertainty ellipses at 50, 100, 150, and 200 days. `figures/postfit_residuals_converged.png` — post-fit residuals after batch convergence showing white-noise character.
+![B-plane ellipses batch](figures/bplane_ellipses_batch.png)
+
+The B-plane covariance ellipses shrink by more than an order of magnitude between 50 and 200 days of data, with the largest reduction between 50 and 100 days. The truth target is enclosed within all ellipses from 100 days onward.
 
 ---
 
@@ -132,7 +154,7 @@ After 150 days, B·R is within **0.08 km (0.0005%)** and B·T within **0.28 km (
 
 ### Anomaly Detection
 
-CKF and EKF residuals both showed a sharp spike around **hour 5200 (day ~217)**. A measurement gap of **139,228 seconds (~1.61 days)** was identified between times 18,674,940 s and 18,814,168 s. Measurements before and after the gap maintained consistent 60-second intervals, but post-gap trajectory was irreconcilable with pre-gap dynamics under standard force models.
+CKF and EKF residuals both showed a sharp spike around **hour 5200 (day ~217)**. A measurement gap of **139,228 seconds (~1.61 days)** was identified between times 18,674,940 s and 18,814,168 s. Measurements before and after the gap maintained consistent 60-second intervals, but the post-gap trajectory was irreconcilable with pre-gap dynamics under standard force models.
 
 ### Filter Comparison
 
@@ -142,7 +164,13 @@ CKF and EKF residuals both showed a sharp spike around **hour 5200 (day ~217)**.
 | CKF    | 14,005,873.9 km   | 2375.25 km/s           | 35.65 km            | 0.36 mm/s               |
 | EKF    | 14,005,873.9 km   | 16.73 km/s             | 16.67 km            | 0.23 mm/s               |
 
-The batch filter produced artificially small post-fit residuals by distributing the anomaly error across the entire arc — it cannot localize a trajectory discontinuity. The CKF and EKF correctly flagged the anomaly through large residual spikes. The EKF outperformed the CKF with better linearization accuracy, requiring ~10–15 measurements to re-converge post-anomaly versus ~25–30 for the CKF, and tolerated finer process noise tuning without numerical instability.
+The batch filter produced artificially small post-fit residuals by distributing the anomaly error across the entire arc — it cannot localize a trajectory discontinuity. The CKF and EKF correctly flagged the anomaly through large residual spikes. The EKF outperformed the CKF, requiring ~10-15 measurements to re-converge post-anomaly versus ~25-30 for the CKF.
+
+### EKF and CKF Post-fit Residuals (Part 3)
+
+![EKF residuals](figures/ekf_postfit_residuals.png)
+
+![CKF residuals](figures/ckf_postfit_residuals.png)
 
 ### Residual Statistics Before and After Gap
 
@@ -177,7 +205,9 @@ A 21.1 m/s delta-V is consistent with a trajectory correction maneuver (TCM) for
 
 The post-anomaly B-plane target shifts by approximately **3640 km in B·R and 3120 km in B·T** — far too large to be explained by model error. This confirms a deliberate flyby geometry change.
 
-> **Figures:** `figures/bplane_anomaly_shift.png` — full B-plane showing pre- and post-anomaly estimates. `figures/bplane_preanomalyzoom.png` — zoomed pre-anomaly convergence. `figures/ekf_residuals_part3.png` — EKF residuals showing anomaly spike at hour 5200. `figures/ckf_residuals_part3.png` — CKF residuals for comparison.
+![B-plane part 3](figures/bplane_ellipses_part3.png)
+
+![B-plane final](figures/bplane_ellipses_final.png)
 
 ---
 
@@ -187,33 +217,33 @@ B-plane parameters were evaluated at 1, 2, 3, and 5 times R_SOI to quantify non-
 
 **Pre-anomaly trajectory:**
 
-| Radius         | B·R (km)  | B·T (km)  |
-|----------------|-----------|-----------|
-| 1 R_SOI (925,000 km)   | 13878.29  | 11235.62  |
-| 2 R_SOI (1,850,000 km) | 13875.38  | 11237.82  |
-| 3 R_SOI (2,775,000 km) | 13871.04  | 11241.47  |
-| 5 R_SOI (4,625,000 km) | 13866.41  | 11245.83  |
+| Radius                        | B·R (km)  | B·T (km)  |
+|-------------------------------|-----------|-----------|
+| 1 R_SOI (925,000 km)          | 13878.29  | 11235.62  |
+| 2 R_SOI (1,850,000 km)        | 13875.38  | 11237.82  |
+| 3 R_SOI (2,775,000 km)        | 13871.04  | 11241.47  |
+| 5 R_SOI (4,625,000 km)        | 13866.41  | 11245.83  |
 
-B·R decreases by **11.88 km (0.085%)** and B·T increases by **10.21 km (0.091%)** across the full radius range, driven by solar radiation pressure and Sun third-body perturbations warping the hyperbolic asymptote. Variations are ~3x larger for the post-anomaly trajectory due to the combined effect of the TCM and accumulated perturbations. This motivates standardizing the computation radius (conventionally 3 R_SOI) for consistent mission-to-mission comparisons.
+B·R decreases by **11.88 km (0.085%)** and B·T increases by **10.21 km (0.091%)** across the full radius range, driven by SRP and Sun third-body perturbations warping the hyperbolic asymptote. This motivates standardizing the computation radius (conventionally 3 R_SOI) for consistent mission-to-mission comparisons.
 
 ---
 
 ## EKF vs. CKF: Quantitative Comparison
 
-| Metric                     | EKF         | CKF         |
-|---------------------------|-------------|-------------|
-| Pre-fit Range RMS          | 0.560 km    | 0.742 km    |
-| Pre-fit Range-Rate RMS     | 4.3e-5 km/s | 8.9e-5 km/s |
-| Post-fit Range RMS         | 6.945 m     | 18.373 m    |
-| Post-fit Range-Rate RMS    | 0.001 mm/s  | 0.004 mm/s  |
-| Post-anomaly re-convergence| ~10–15 obs  | ~25–30 obs  |
-| Anomaly detection clarity  | Clear spike | Distorted   |
+| Metric                      | EKF         | CKF         |
+|-----------------------------|-------------|-------------|
+| Pre-fit Range RMS           | 0.560 km    | 0.742 km    |
+| Pre-fit Range-Rate RMS      | 4.3e-5 km/s | 8.9e-5 km/s |
+| Post-fit Range RMS          | 6.945 m     | 18.373 m    |
+| Post-fit Range-Rate RMS     | 0.001 mm/s  | 0.004 mm/s  |
+| Post-anomaly re-convergence | ~10-15 obs  | ~25-30 obs  |
+| Anomaly detection clarity   | Clear spike | Distorted   |
 
 EKF post-fit range residuals are **2.6x lower** than CKF, with cleaner anomaly localization and more stable process noise tuning.
 
 ---
 
-## Process Noise Strategy
+## Process Noise Strategy (Part 3)
 
 Three process noise approaches were evaluated for the anomaly scenario:
 
@@ -223,9 +253,9 @@ Q_pre  = diag([2e-4, 2e-4, 2e-4, 2.5e-15, 2.5e-15, 2.5e-15, 0])
 Q_post = diag([2e-6, 2e-6, 2e-6, 6e-14,   6e-14,   6e-14,   0])
 ```
 
-**Maneuver window detection (selected):** Identifies measurement gaps exceeding a 600-second threshold, then applies elevated `Q_high` only within a short window following each gap. Concentrates noise injection where it is most needed while preserving filter precision during nominal arcs.
+**Maneuver window detection:** Identifies measurement gaps exceeding a 600-second threshold, then applies elevated `Q_high` only within a short window following each gap. Concentrates noise injection where it is most needed while preserving filter precision during nominal arcs.
 
-**Explicit maneuver modeling (final approach):** Augments the state with `[dVx, dVy, dVz]`, applies the impulse at the estimated maneuver epoch, and estimates the maneuver parameters jointly with the trajectory. Produced the lowest post-fit residuals and physically interpretable maneuver parameters.
+**Explicit maneuver modeling (best results):** Applies an impulsive delta-V at the estimated maneuver epoch and re-linearizes from the post-maneuver state. Produced the lowest post-fit residuals and physically interpretable maneuver parameters.
 
 ---
 
@@ -234,46 +264,70 @@ Q_post = diag([2e-6, 2e-6, 2e-6, 6e-14,   6e-14,   6e-14,   0])
 ```
 interplanetary-orbit-determination/
 |
-|-- Project2_exec_main_all_filters.m   # Top-level script: runs Part 2 and Part 3
-|-- Project_exec_2.m                   # Part 2 standalone execution
-|-- run_part3_ekf.m                    # Part 3 EKF with anomaly modeling
+|-- main_all_filters.m          # Top-level driver: all three filters, full post-processing
+|-- main_part2_batch.m          # Part 2 standalone: batch filter only
+|-- main_bplane_analysis.m      # B-plane analysis and multi-epoch ellipse plotting
 |
 |-- filters/
-|   |-- filter_LS.m                    # Batch least squares
-|   |-- filter_ckf.m                   # Classical Kalman filter
-|   |-- filter_ekf.m                   # Extended Kalman filter with process noise
+|   |-- filter_LS.m             # Batch least squares (iterated, weighted)
+|   |-- filter_ck.m             # Classical Kalman Filter
+|   |-- filter_ekf.m            # Extended Kalman Filter with process noise strategies
 |
 |-- dynamics/
-|   |-- twobodySunSRP.m                # EOM: Earth + Sun gravity + SRP
-|   |-- spacecraft_dynamics.m          # Supporting dynamics calculations
-|   |-- propagate_state_and_stm.m      # Integrates state and STM together
+|   |-- twobodySunSRP.m         # EOM + STM: Earth gravity + Sun third-body + SRP
+|   |-- compute_jacobian_analytical.m  # Analytical A matrix (7x7 Jacobian)
+|   |-- propagate_state_and_stm.m      # Standalone state + STM propagator
 |
 |-- measurements/
-|   |-- epoch_range_rangerate.m        # Computes theoretical rho, rho-dot
-|   |-- compute_measurement_partials.m # H-tilde: partial derivatives of measurements
-|   |-- Htilde_6080.m                  # Specialized measurement sensitivity matrix
+|   |-- epoch_range_rangerate.m        # Computes theoretical rho and rho-dot
+|   |-- Htilde_6080.m                  # Measurement partial matrix H-tilde (2x7)
+|   |-- compute_measurement_partials.m # Measurement partials (alternate implementation)
 |
 |-- bplane/
-|   |-- compute_bplane.m               # Computes B.R and B.T at specified radius
 |   |-- propagate_to_bplane.m          # Propagates state + covariance to B-plane
+|   |-- compute_bplane.m               # Computes B.R and B.T from state
 |   |-- build_bplane_rotation_matrix.m # Constructs S-T-R frame from v_infinity
-|   |-- plot_bplane_ellipses.m         # 3-sigma covariance ellipses by data arc
-|   |-- Pb2h_plotting_Bplane_ellipse.m # Covariance rotation into B-plane frame
+|   |-- plot_bplane_ellipses.m         # Multi-epoch 3-sigma ellipse plots
 |   |-- error_ellipse.m                # General 2D error ellipse utility
+|   |-- plot_covariance_ellipsoid.m    # 3D covariance ellipsoid visualization
 |
 |-- utils/
 |   |-- Ephem.m                        # Earth ephemeris (Meeus algorithm)
-|   |-- eletorv.m                      # Orbital element to state vector converter
-|   |-- plot_covariance_ellipsoid.m    # 3D covariance visualization
-|   |-- test_dynamics.m                # Dynamics verification utility
+|   |-- eletorv.m                      # Orbital elements to position/velocity
+|   |-- test_dynamics.m                # Dynamics verification against truth trajectory
+|   |-- Bplane_dynamics_verification.m # B-plane geometry verification
 |
-|-- figures/                           # Output plots (see Results sections above)
-|
-|-- .gitignore
+|-- figures/                           # Simulation output plots
 |-- README.md
 ```
 
-**Note:** Course observation data files (`Project2a_Obs.txt`, `Project2b_Obs.txt`) and the truth trajectory (`Project2_Prob2_truth_traj_50days.mat`) are not included in this repository as they are proprietary course materials from Prof. McMahon. The code is fully functional with equivalent DSN measurement data in the same format.
+**Note:** Course observation data files (`Project2a_Obs.txt`, `Project2b_Obs.txt`) and the truth trajectory (`Project2_Prob2_truth_traj_50days.mat`) are not included as they are proprietary course materials. The code is fully functional with equivalent DSN measurement data in the same format.
+
+---
+
+## How to Run
+
+**Dependencies:** MATLAB R2021a or later. No additional toolboxes required.
+
+**Part 2 (known scenario, batch filter):**
+```matlab
+run('main_part2_batch.m')
+```
+
+**All filters with full post-processing (set `useFilter = 1/2/3` at top of file):**
+```matlab
+% useFilter = 1  →  Batch Least Squares
+% useFilter = 2  →  Classical Kalman Filter
+% useFilter = 3  →  Extended Kalman Filter (use for Part 3)
+run('main_all_filters.m')
+```
+
+**B-plane analysis at multiple epochs:**
+```matlab
+run('main_bplane_analysis.m')
+```
+
+Place observation data files in the root directory before running.
 
 ---
 
@@ -283,34 +337,10 @@ interplanetary-orbit-determination/
 - Variational equations and STM propagation for linearized covariance mapping
 - Analytical Jacobian derivation for a multi-force dynamics model (gravity + SRP)
 - DSN ground station geometry: ECEF-to-ECI rotation, range and range-rate partial derivatives
-- B-plane targeting: S-T-R frame construction, hyperbolic asymptote propagation, linearized time of flight, covariance projection into the B-plane
+- B-plane targeting: S-T-R frame construction, hyperbolic asymptote propagation, linearized time of flight, covariance projection
 - Anomaly detection via sequential filter residual analysis
-- Adaptive process noise design for unmodeled dynamics
-- Explicit maneuver parameter estimation via state augmentation
+- Adaptive process noise design and explicit maneuver parameter estimation
 - Solar system ephemeris computation (Meeus algorithm)
-
----
-
-## How to Run
-
-**Dependencies:** MATLAB R2021a or later. No additional toolboxes required.
-
-**Part 2 (known scenario):**
-```matlab
-run('Project_exec_2.m')
-```
-
-**Part 3 (anomaly scenario, EKF with maneuver modeling):**
-```matlab
-run('run_part3_ekf.m')
-```
-
-**All filters (Part 2 + Part 3 comparison):**
-```matlab
-run('Project2_exec_main_all_filters.m')
-```
-
-Figures are saved automatically to `figures/`. Place observation data files in the root directory before running.
 
 ---
 
